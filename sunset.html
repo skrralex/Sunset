@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Interactive Scroll Sunset - Visible Ripples</title>
+
+  <style>
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 600vh;
+      background: rgb(250, 249, 244);
+      font-family: Arial, sans-serif;
+    }
+
+    #sky {
+      position: fixed;
+      inset: 0;
+      z-index: -4;
+      background: rgb(250, 249, 244);
+    }
+
+    #sun {
+      position: fixed;
+      left: 50%;
+      top: 15%;
+      width: 130px;
+      height: 130px;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      background: #fff8cf;
+      box-shadow:
+        0 0 40px rgba(255, 246, 184, 0.8),
+        0 0 100px rgba(255, 213, 128, 0.45);
+      z-index: -3;
+      pointer-events: none;
+    }
+
+    #star-canvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: -2;
+      pointer-events: none;
+    }
+
+    main {
+      width: min(700px, calc(100% - 40px));
+      margin: 0 auto;
+      color: #282828;
+    }
+
+    section {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+    }
+
+    h1, h2 {
+      margin: 0;
+      font-weight: 400;
+      letter-spacing: 0.04em;
+    }
+
+    h1 { font-size: clamp(2.5rem, 8vw, 6rem); }
+    h2 { font-size: clamp(2rem, 6vw, 4rem); }
+    
+    p {
+      max-width: 500px;
+      margin: 20px auto 0;
+      font-size: 1.1rem;
+      line-height: 1.6;
+    }
+
+    #progress {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      font-size: 0.8rem;
+      letter-spacing: 0.08em;
+      color: inherit;
+      opacity: 0.65;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="sky"></div>
+  <div id="sun"></div>
+
+  <canvas id="star-canvas"></canvas>
+
+  <main>
+    <section>
+      <div>
+        <h1>Morning</h1>
+        <p>Scroll down and watch the sun set.</p>
+      </div>
+    </section>
+    <section>
+      <div><h2>Afternoon</h2></div>
+    </section>
+    <section>
+      <div><h2>Golden hour</h2></div>
+    </section>
+    <section>
+      <div><h2>Sunset</h2></div>
+    </section>
+    <section>
+      <div><h2>Twilight</h2></div>
+    </section>
+    <section>
+      <div><h2>Night</h2></div>
+    </section>
+  </main>
+
+  <div id="progress">0%</div>
+
+  <script>
+    const sky = document.querySelector("#sky");
+    const sun = document.querySelector("#sun");
+    const progressLabel = document.querySelector("#progress");
+    const canvas = document.querySelector("#star-canvas");
+    const context = canvas.getContext("2d");
+
+    const colorStops = [
+      { position: 0, color: [156, 233, 255] },
+      { position: 0.18, color: [255, 238, 194] },
+      { position: 0.38, color: [255, 174, 103] },
+      { position: 0.55, color: [239, 107, 122] },
+      { position: 0.7, color: [124, 75, 134] },
+      { position: 0.84, color: [43, 53, 105] },
+      { position: 1, color: [6, 18, 48] }
+    ];
+
+    const pointer = {
+      x: -1000,
+      y: -1000,
+      lastX: -1000,
+      lastY: -1000,
+      vx: 0,
+      vy: 0,
+      speed: 0,
+      active: false,
+      distanceSinceLastRipple: 0 // Track distance to spawn ripples evenly
+    };
+
+    let stars = [];
+    let ripples = []; // Array to hold visual expanding ripples
+    let scrollProgress = 0;
+    let starVisibility = 0;
+    let devicePixelRatioValue = 1;
+
+    const STAR_DENSITY = 0.00018; 
+    const CURSOR_RADIUS = 350;    
+    const CURSOR_FORCE = 1.0;     
+    const RETURN_FORCE = 0.015;   
+    const FRICTION = 0.88;        
+    const DRIFT_STRENGTH = 0.003;
+
+    function clamp(value, min, max) {
+      return Math.min(Math.max(value, min), max);
+    }
+
+    function lerp(start, end, amount) {
+      return start + (end - start) * amount;
+    }
+
+    function interpolateColor(colorA, colorB, amount) {
+      const red = Math.round(lerp(colorA[0], colorB[0], amount));
+      const green = Math.round(lerp(colorA[1], colorB[1], amount));
+      const blue = Math.round(lerp(colorA[2], colorB[2], amount));
+      return `rgb(${red}, ${green}, ${blue})`;
+    }
+
+    function getSkyColor(progress) {
+      for (let i = 0; i < colorStops.length - 1; i++) {
+        const current = colorStops[i];
+        const next = colorStops[i + 1];
+
+        if (progress >= current.position && progress <= next.position) {
+          const localProgress =
+            (progress - current.position) /
+            (next.position - current.position);
+          const smoothProgress =
+            localProgress * localProgress * (3 - 2 * localProgress);
+
+          return interpolateColor(current.color, next.color, smoothProgress);
+        }
+      }
+      const finalColor = colorStops[colorStops.length - 1].color;
+      return interpolateColor(finalColor, finalColor, 1);
+    }
+
+    // New Ripple Class
+    class Ripple {
+      constructor(x, y, intensity) {
+        this.x = x;
+        this.y = y;
+        this.radius = 0;
+        // Faster mouse = bigger ripple
+        this.maxRadius = clamp(30 + intensity * 5, 40, 150);
+        // Faster mouse = brighter ripple
+        this.baseOpacity = clamp(0.1 + intensity * 0.015, 0.1, 0.4);
+        this.speed = clamp(1 + intensity * 0.05, 1, 3);
+        this.active = true;
+      }
+
+      update() {
+        this.radius += this.speed;
+        if (this.radius >= this.maxRadius) {
+          this.active = false;
+        }
+      }
+
+      draw(ctx, globalVisibility) {
+        if (!this.active) return;
+        
+        // Fade out as it expands
+        const progress = this.radius / this.maxRadius;
+        const currentOpacity = this.baseOpacity * (1 - progress) * globalVisibility;
+
+        if (currentOpacity <= 0.01) return;
+
+        ctx.save();
+        ctx.beginPath();
+        // Use an ellipse to match the perspective multiplier (1.6) used on the stars
+        ctx.ellipse(this.x, this.y, this.radius, this.radius / 1.6, 0, 0, Math.PI * 2);
+        
+        // A soft, reflective blue/white color
+        ctx.strokeStyle = `rgba(180, 210, 255, ${currentOpacity})`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    class Star {
+      constructor() {
+        this.reset();
+      }
+
+      reset() {
+        this.homeX = Math.random() * window.innerWidth;
+        this.homeY = Math.random() * window.innerHeight;
+        this.x = this.homeX;
+        this.y = this.homeY;
+        this.velocityX = 0;
+        this.velocityY = 0;
+        this.radius = 0.4 + Math.random() * 1.5;
+        this.baseOpacity = 0.25 + Math.random() * 0.7;
+        this.twinkleSpeed = 0.001 + Math.random() * 0.0035;
+        this.twinklePhase = Math.random() * Math.PI * 2;
+        this.driftPhaseX = Math.random() * Math.PI * 2;
+        this.driftPhaseY = Math.random() * Math.PI * 2;
+        this.driftSpeedX = 0.00015 + Math.random() * 0.00035;
+        this.driftSpeedY = 0.00015 + Math.random() * 0.00035;
+      }
+
+      update(time) {
+        const driftX = Math.sin(time * this.driftSpeedX + this.driftPhaseX) * DRIFT_STRENGTH;
+        const driftY = Math.cos(time * this.driftSpeedY + this.driftPhaseY) * DRIFT_STRENGTH;
+
+        this.velocityX += driftX;
+        this.velocityY += driftY;
+
+        const returnX = this.homeX - this.x;
+        const returnY = this.homeY - this.y;
+
+        this.velocityX += returnX * RETURN_FORCE;
+        this.velocityY += returnY * RETURN_FORCE;
+
+        if (pointer.active) {
+          const differenceX = this.x - pointer.x;
+          const differenceY = (this.y - pointer.y) * 1.6; 
+
+          const distance = Math.sqrt(differenceX * differenceX + differenceY * differenceY);
+
+          if (distance > 0 && distance < CURSOR_RADIUS) {
+            const trueDistance = Math.sqrt(differenceX * differenceX + (this.y - pointer.y) * (this.y - pointer.y));
+            const normalX = differenceX / trueDistance;
+            const normalY = (this.y - pointer.y) / trueDistance;
+
+            const rippleFrequency = 0.05; 
+            const rippleSpeed = 0.005; 
+            
+            const wave = Math.sin(distance * rippleFrequency - time * rippleSpeed);
+            const envelope = 1 - (distance / CURSOR_RADIUS);
+            const easedEnvelope = envelope * envelope;
+            
+            const speedMultiplier = clamp(pointer.speed * 0.2, 0, 3.5);
+            const rippleForce = wave * easedEnvelope * CURSOR_FORCE * speedMultiplier;
+
+            this.velocityX += normalX * rippleForce;
+            this.velocityY += normalY * rippleForce;
+
+            const wakeForceX = pointer.vx * easedEnvelope * 0.015;
+            const wakeForceY = pointer.vy * easedEnvelope * 0.015;
+            
+            this.velocityX += wakeForceX;
+            this.velocityY += wakeForceY;
+          }
+        }
+
+        this.velocityX *= FRICTION;
+        this.velocityY *= FRICTION;
+
+        this.x += this.velocityX;
+        this.y += this.velocityY;
+      }
+
+      draw(time) {
+        const twinkle = 0.55 + Math.sin(time * this.twinkleSpeed + this.twinklePhase) * 0.35;
+        const randomFlicker = Math.sin(time * this.twinkleSpeed * 2.7 + this.twinklePhase * 1.8) * 0.1;
+
+        const opacity = clamp((twinkle + randomFlicker) * this.baseOpacity * starVisibility, 0, 1);
+        if (opacity <= 0.005) return;
+
+        const pulseSize = this.radius * (0.85 + Math.sin(time * this.twinkleSpeed + this.twinklePhase) * 0.15);
+
+        context.beginPath();
+        context.arc(this.x, this.y, pulseSize, 0, Math.PI * 2);
+        context.fillStyle = `rgba(255, 255, 245, ${opacity})`;
+        context.fill();
+
+        if (this.radius > 1.1) {
+          const glowOpacity = opacity * 0.16;
+          context.beginPath();
+          context.arc(this.x, this.y, pulseSize * 4, 0, Math.PI * 2);
+          context.fillStyle = `rgba(210, 225, 255, ${glowOpacity})`;
+          context.fill();
+        }
+      }
+    }
+
+    function createStars() {
+      const screenArea = window.innerWidth * window.innerHeight;
+      const amount = clamp(Math.round(screenArea * STAR_DENSITY), 80, 400);
+      stars = [];
+      for (let i = 0; i < amount; i++) {
+        stars.push(new Star());
+      }
+    }
+
+    function resizeCanvas() {
+      devicePixelRatioValue = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = window.innerWidth * devicePixelRatioValue;
+      canvas.height = window.innerHeight * devicePixelRatioValue;
+      canvas.style.width = `${window.innerWidth}px`;
+      canvas.style.height = `${window.innerHeight}px`;
+      context.setTransform(devicePixelRatioValue, 0, 0, devicePixelRatioValue, 0, 0);
+      createStars();
+    }
+
+    function updateScene() {
+      const scrollableHeight = document.documentElement.scrollHeight - window.innerHeight;
+      scrollProgress = scrollableHeight > 0
+          ? clamp(window.scrollY / scrollableHeight, 0, 1)
+          : 0;
+
+      sky.style.background = getSkyColor(scrollProgress);
+
+      const sunTop = lerp(15, 112, scrollProgress);
+      const sunScale = lerp(0.7, 2.9, scrollProgress); 
+
+      sun.style.top = `${sunTop}%`;
+      sun.style.transform = `translate(-50%, 30%) scale(${sunScale})`;
+
+      const sunRed = 255;
+      const sunGreen = Math.round(lerp(248, 116, scrollProgress));
+      const sunBlue = Math.round(lerp(207, 65, scrollProgress));
+
+      sun.style.background = `rgb(${sunRed}, ${sunGreen}, ${sunBlue})`;
+
+      const glowStrength = lerp(0.8, 0.15, scrollProgress);
+      sun.style.boxShadow = `
+        0 0 40px rgba(255, 220, 150, ${glowStrength}),
+        0 0 120px rgba(255, 120, 80, ${glowStrength * 0.65})
+      `;
+
+      starVisibility = clamp((scrollProgress - 0.66) / 0.25, 0, 1);
+      const textProgress = clamp((scrollProgress - 0.55) / 0.2, 0, 1);
+      const textValue = Math.round(lerp(40, 245, textProgress));
+
+      document.body.style.color = `rgb(${textValue}, ${textValue}, ${textValue})`;
+      progressLabel.textContent = `${Math.round(scrollProgress * 100)}%`;
+    }
+
+    function animateStars(time) {
+      context.clearRect(0, 0, window.innerWidth, window.innerHeight);
+
+      if (pointer.active) {
+        let dx = pointer.x - pointer.lastX;
+        let dy = pointer.y - pointer.lastY;
+        let frameSpeed = Math.sqrt(dx * dx + dy * dy);
+        
+        if (frameSpeed > 100) frameSpeed = 100;
+        
+        pointer.speed = pointer.speed * 0.92 + frameSpeed * 0.08;
+        pointer.vx = pointer.vx * 0.85 + dx * 0.15;
+        pointer.vy = pointer.vy * 0.85 + dy * 0.15;
+        
+        // --- RIPPLE SPAWN LOGIC ---
+        pointer.distanceSinceLastRipple += frameSpeed;
+        
+        // Spawn a new ripple if the mouse has moved enough distance AND is moving fast enough
+        if (pointer.distanceSinceLastRipple > 25 && frameSpeed > 2 && starVisibility > 0.01) {
+          ripples.push(new Ripple(pointer.x, pointer.y, pointer.speed));
+          pointer.distanceSinceLastRipple = 0;
+        }
+
+        pointer.lastX = pointer.x;
+        pointer.lastY = pointer.y;
+      } else {
+        pointer.speed *= 0.9;
+        pointer.vx *= 0.9;
+        pointer.vy *= 0.9;
+      }
+
+      if (starVisibility > 0.001) {
+        // Draw the visual ripples first (so they are "under" or alongside the stars)
+        for (let i = ripples.length - 1; i >= 0; i--) {
+          const ripple = ripples[i];
+          ripple.update();
+          ripple.draw(context, starVisibility);
+          
+          // Remove dead ripples from the array
+          if (!ripple.active) {
+            ripples.splice(i, 1);
+          }
+        }
+
+        for (const star of stars) {
+          star.update(time);
+          star.draw(time);
+        }
+      }
+      
+      requestAnimationFrame(animateStars);
+    }
+
+    function updatePointer(x, y) {
+      if (!pointer.active) {
+        pointer.lastX = x;
+        pointer.lastY = y;
+      }
+      pointer.x = x;
+      pointer.y = y;
+      pointer.active = true;
+    }
+
+    window.addEventListener("pointermove", event => {
+        updatePointer(event.clientX, event.clientY);
+    }, { passive: true });
+
+    window.addEventListener("pointerleave", () => {
+        pointer.active = false;
+    });
+
+    window.addEventListener("touchmove", event => {
+        const touch = event.touches[0];
+        if (touch) updatePointer(touch.clientX, touch.clientY);
+    }, { passive: true });
+
+    window.addEventListener("touchend", () => {
+        pointer.active = false;
+    }, { passive: true });
+
+    window.addEventListener("scroll", updateScene, { passive: true });
+    window.addEventListener("resize", () => {
+        resizeCanvas();
+        updateScene();
+    });
+
+    resizeCanvas();
+    updateScene();
+    requestAnimationFrame(animateStars);
+  </script>
+</body>
+</html>
